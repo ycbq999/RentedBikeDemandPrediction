@@ -1,0 +1,955 @@
+---
+title: "DG21-Final Report - Predicting Demand for Rented Bikes"
+author: "Song Chen, Asiri Silva, Satyo Iswara"
+date: "08/08/2021"
+output:
+  html_document: 
+    theme: readable
+    toc: yes
+  pdf_document: default
+urlcolor: cyan
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+
+options(scipen = 1, digits = 4, width = 80, fig.align = "center")
+
+library(knitr)
+library(lmtest)
+library(car)
+library(MASS)
+library(dplyr)
+library(ggplot2)
+#install.packages('patchwork')
+library(patchwork)
+opts_chunk$set(cache = TRUE, autodep = TRUE)
+```
+
+
+## Introduction  
+
+Sharing economy is booming in many urban cities thanks to the many telecommunication technologies. Data analysis particularly plays a key part of this emerging business. A good model for demand prediction is the driving force to survive in this industry. We found that this dataset presents typical information for us to build a good regression model to predict the hourly bike demand in Seoul South Korea during the year between 2017 and 2018. Based on this model, we hope that with the updated data, the organization can provide the city with a stable supply of rental bikes in a timely manner from now on. 
+
+The dataset originally published on SOUTH KOREA PUBLIC HOLIDAYS. This data set contains the following variables :
+
+
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Date** -  year-month-day                                  | **Dew point temperature** - Celsius                                      |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Rented Bike count** - Count of bikes rented at each hour  | **Solar radiation** - MJ/m2                                              |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Hour** - Hour of he day                                   | **Rainfall** - mm                                                        |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Temperature** - Temperature in Celsius                    | **Snowfall** - cm                                                        |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Humidity** - %                                            | **Seasons**- Winter, Spring, Summer, Autumn                              |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Windspeed** - m/s                                         | **Holiday** - Holiday/No holiday                                         |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+| **Visibility** - 10m                                        | **Functional Day** - NoFunc(Non Functional Hours), Fun(Functional hours) |
++-------------------------------------------------------------+--------------------------------------------------------------------------+
+
+
+We are planning to apply multiple linear regression and find the best model using different evaluation methods. What we are interested in is finding which factors play major contributions in this prediction and we would like to compare these factors to the ones we expect before the data modeling.  
+
+# Methods
+
+## Data Preparation 
+
+### Data Exploration
+
+```{r}
+origin_set = read.csv("SeoulBikeData.csv",stringsAsFactors=TRUE)
+origin_set$Date = as.Date(origin_set$Date, format = c("%d/%m/%Y"))
+origin_set$Seasons = factor(origin_set$Seasons, levels = c('Winter','Spring','Summer','Autumn'))
+str(origin_set)
+```
+
+We first read the dataset from the csv file. Successfully convert string variable to factors. Also convert Date to correct Date type.
+
+As we scan the data read from the csv file, we notice that we need to trim the data and reshape it to a more meaningful dataframe.
+
+**First, we only look at the data that Functioning.Day is Yes.**
+
+```{r}
+origin_set = origin_set[origin_set$Functioning.Day == "Yes",]
+origin_set$Functioning.Day = NULL
+```
+
+
+**Second, a deeper understanding of time related variable is needed **
+
+```{r echo=FALSE, fig.width=8,fig.height = 6}
+panel.cor = function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    #cex.cor <- 0.8/strwidth(txt) 
+    text(0.5, 0.5, txt, cex = 1)
+}
+
+upper.panel<-function(x, y){
+  points(x,y, pch = 19, col = 'cadetblue')
+}
+
+datetime_variables = cbind(origin_set$Rented.Bike.Count, origin_set$Date,origin_set$Hour,origin_set$Seasons)
+colnames(datetime_variables) = c("Rented.Bike.Count","Date", "Hour", "Seasons")
+pairs(datetime_variables, lower.panel = panel.cor, upper.panel = upper.panel)
+```
+
+As we can see from the scatter plots shows, Date and Seasons are highly correlated variables. The correlation is 0.97. 
+
+
+```{r echo=FALSE, fig.height=6, fig.width=20}
+
+par(mfrow=c(1,2))
+
+a = origin_set %>%
+    group_by(Seasons) %>%
+    summarise(sum_count = mean(Rented.Bike.Count))
+
+
+b = origin_set %>%
+    group_by(Date) %>%
+    summarise(sum_count = mean(Rented.Bike.Count))
+barplot(a$sum_count,names.arg=a$Seasons,xlab="Seasons",ylab="Count",col="cadetblue",
+main="Seasons vs # of Rented Bikes",space=5)
+
+barplot(b$sum_count,names.arg=b$Date,xlab="Date",ylab="Count",col="cadetblue",
+main="Dates vs # of Rented Bikes")
+```
+
+
+
+As we compare the Season and Date plot in a larger plot shown above, the shape are almost same. We then need to keep only one variable. As a common sense, we keep Seasons for simplicity. However, we also want to transform Date into a more informative variable. Therefore based on the Date variable, we create a factor variable Day and a Factor variable Weekend. We then look through how each day of week and each hour of day affect the bike demand.
+
+
+```{r echo=FALSE}
+#Extracting Day of the week from date and categorizing into Weekend and Weekday
+
+origin_set$Day = format(origin_set$Date, '%A')
+weekdays <- c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday')
+origin_set$Weekend = factor((origin_set$Day %in% weekdays),levels = c(FALSE, TRUE),labels = c('weekend', 'weekday'))
+origin_set$Day = factor(origin_set$Day, levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))
+
+#removing date
+origin_set$Date = NULL
+```
+
+
+
+
+```{r echo=FALSE}
+dayofweek_summary = aggregate(list(origin_set$Rented.Bike.Count), by = list(origin_set$Day), FUN = 'mean')
+names(dayofweek_summary) = c("DayofWeek","AvgRentedBikeCount")
+
+g0 = ggplot(data=dayofweek_summary, aes(x=DayofWeek, y=round(AvgRentedBikeCount, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue",width=0.4)+ xlab("Day of Week") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Day of Week")+
+    geom_text(aes(label=round(AvgRentedBikeCount,digits=0)), vjust=-0.3, size=3.5)+ylim(0,900)+
+  theme_minimal()
+```
+
+
+
+```{r echo=FALSE}
+# 1 . Binning hours to time period
+# 2.  Creating a factor variable for hour
+origin_set$Hour <- as.numeric(origin_set$Hour)
+breaks = c(0,4,7,10,13,17,20,24)
+hours_label = c('midnight', 'sunrise','rushmorning','forenoon','afternoon','rusheven','evening')
+group_tags <- cut(origin_set$Hour, 
+                  breaks=breaks, 
+                  include.lowest=TRUE, 
+                  right=FALSE, 
+                  labels=hours_label)
+origin_set$timeslot = group_tags
+origin_set$Hour = factor(origin_set$Hour)
+```
+
+
+```{r ,echo=FALSE,fig.height=4, , fig.width=12}
+hourly_summary = aggregate(list(origin_set$Rented.Bike.Count), by = list(origin_set$Hour), FUN = 'mean')
+names(hourly_summary) = c("Hour","AvgRentedBikeCount")
+
+g1 = ggplot(data=hourly_summary, aes(x=Hour, y=round(AvgRentedBikeCount, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue")+ xlab("Hour") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Hour")+
+    geom_text(aes(label=round(AvgRentedBikeCount,digits=0)), vjust=-0.3, size=3.5)+
+      theme(axis.text.x = element_text(size = 8))+
+  theme_minimal()
+
+g0+g1
+```
+Looking at average bike count through the week, from the bar chart above, Sundays appear to have the lowest demand, while Fridays, and Wednesdays are the top two days in terms of bike demand.  
+
+We notice Hour variable should be a categorical variable. So we take a look at how the hours affect the bike demand
+We notice from second bar chart above that there is higher demand around 8 am in the morning rush hour and in the afternoon around 6pm. So we create a new variable to make 7 time slots that separate the rush hours.  
+
+
+```{r echo=FALSE, fig.height=7, , fig.width=7}
+library(dplyr)
+library(ggplot2)
+
+c = origin_set %>%
+	group_by(timeslot) %>%
+	summarise(sum_count = mean(Rented.Bike.Count))
+
+# par(mfrow=c(2,1))
+# barplot(c$sum_count,names.arg=c$timeslot,xlab="Time Slots",ylab="Count",col="cadetblue",
+# main="Time Slots vs # of Rented Bikes",space=1,cex.axis=1, cex.names=0.8)
+# barplot(d$sum_count,names.arg=d$Weekend,xlab="Weekend",ylab="Count",col="cadetblue",
+# main="Weekend vs # of Rented Bikes",space=2)
+
+g2 = ggplot(data=c, aes(x=timeslot, y=round(sum_count, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue",width=0.4)+ xlab("Time Slot") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Timeslot")+
+    geom_text(aes(label=round(sum_count,digits=0)), vjust=-0.3, size=3.5)+ ylim(0,1500)+
+      theme(axis.text.x = element_text(size = 8))+
+  theme_minimal()
+
+```
+
+
+
+```{r echo=FALSE, fig.height=4, , fig.width=12}
+d = origin_set %>%
+	group_by(Weekend) %>%
+	summarise(sum_count = mean(Rented.Bike.Count))
+
+
+g3 =ggplot(data=d, aes(x=Weekend, y=round(sum_count, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue",width=0.4)+ xlab("Time Slot") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Weekday vs. Weekend")+
+    geom_text(aes(label=round(sum_count,digits=0)), vjust=-0.3, size=3.5)+ ylim(0,800)+
+      theme(axis.text.x = element_text(size = 8))+
+  theme_minimal()
+
+g2+g3
+
+```
+
+We also can see from the bar charts above that the weekday has a higher demand than weekdays. So we want to put those factors in the data modelling. 
+
+
+### Data Extraction and Transformation
+
+Based on what we discovered from the dataset, we extracted the key variables and transform them into a new dataframe. We also give them a shorter version of names to make it easier to refer them in the model definition.
+
+```{r include=FALSE}
+# Check Missing Data
+bikeDemand = origin_set
+sum(is.na(bikeDemand))==0   # pass
+
+#rename variables
+
+
+colnames(bikeDemand) = c("count" ,"hour","temp", "humid", "windspeed", 
+                      "visibility", "dewtemp", "solar","rainfall","snowfall",
+                      "season","holiday","dayofweek","weekend","timeslot")
+
+```
+
+Finally, after data cleaning and data transformation, we have our final version of dataframe.
+
+```{r echo=FALSE}
+str(bikeDemand)
+```
+
+
+**Data Train Test Split**
+ 
+
+The dataset is split into a train(70%) set and a test(30%) set. The train set will be used to build the model, while the test set will be used for evaluating model accuracy
+
+```{r echo=TRUE}
+# train-test split  70%/30%
+set.seed(42)
+train_size = nrow(bikeDemand)*0.7
+bikeDemand_tr_idx = sample(nrow(bikeDemand), train_size)
+bikeDemand_trn = bikeDemand[bikeDemand_tr_idx,]
+bikeDemand_tst = bikeDemand[-bikeDemand_tr_idx,]
+```
+
+
+**Variable Selection**
+
+Given that the dataset contains many weather related variables, we would like to see if there are potential redundant variables that may cause collinearity when building models.
+
+```{r ,echo=FALSE,fig.height=15, , fig.width=15}
+panel.cor = function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    #cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = 1)
+}
+
+upper.panel<-function(x, y){
+  points(x,y, pch = 19, col = 'cadetblue',cex = .5)
+}
+
+weather_variables = bikeDemand_trn[,c("count","temp","humid","windspeed","visibility","dewtemp","solar","rainfall","snowfall")]
+#colnames(datetime_variables) = c("Rented.Bike.Count","Date", "Hour", "Seasons")
+pairs(weather_variables, lower.panel = panel.cor, upper.panel = upper.panel,cex.labels=2)
+```
+
+Looking at the correlation graph above, we can see that dewtemp and temp variable have 92% correlation. 
+
+
+We also see a 99% of the variability of the dewtemp variable is explained by the other variables in the dataset. Therefore, we can exclude dewtemp variable from the modeling process.
+
+```{r}
+#dewtemp as a linear combination of other variables
+m = lm(dewtemp ~ . - count, data  = bikeDemand_trn)
+summary(m)$adj.r.squared
+```
+
+```{r include=FALSE}
+#excluding dewtemp
+bikeDemand_trn$dewtemp = NULL
+```
+
+
+```{r include=FALSE}
+#function to conduct constant variance test
+check_constant_variance = function(model){
+  x = bptest(model)
+  return(bptest(model)$p.value[["BP"]])
+}
+#function to conduct the normality test
+check_normality = function(model, random_samples = 5){
+  probs = rep(0, random_samples)
+  for(i in 1:random_samples){
+    probs[i] = shapiro.test(sample(hatvalues(model),5000))$p.value #run Shapiro test for multiple random samples  
+  }
+  return(mean(probs))
+}
+
+test_rmse = function(model, testdataset, is_dependent_log = FALSE){
+  
+  if(is_dependent_log){
+    pred = exp(predict(model, newdata = testdataset))
+  }else{
+    pred = predict(model, newdata = testdataset)
+  }
+  
+  rmse = sqrt(mean((pred - testdataset$count)^2))
+  rmse
+}
+
+
+test_mae = function(model, testdataset, is_dependent_log = FALSE){
+  
+  if(is_dependent_log){
+    pred = exp(predict(model, newdata = testdataset))
+  }else{
+    pred = predict(model, newdata = testdataset)
+  }
+  
+  mae = MLmetrics::MAE(pred, testdataset$count)
+  mae
+}
+
+calc_loocv_rmse = function(model) {
+  sqrt(mean((resid(model) / (1 - hatvalues(model))) ^ 2))
+}
+
+
+print_formula = function(model){
+  x = as.character(formula(model))
+  paste(x[2],x[3],sep="~")
+}
+
+```
+
+
+
+## Data Modeling 
+
+In this section we explore multiple modeling approaches with the aim of finding a model with good accuracy. We start with a simple additive model, and then later on introduce interations, and higher order terms to further test out different types of models.
+
+### Simple Additive and Interactive Models
+
+We start our model search with building a simple additive and a simple interaction model.
+
+We start with simple additive full model, using BIC stepwise search to find some key predictors. 
+
+```{r}
+#Simple Additive Model
+fullModel = lm( count ~., data = bikeDemand_trn)
+selectedBICStepModel = step(fullModel, 
+                            direction = 'both',
+                            k = log(nrow(bikeDemand_trn)), 
+                            trace = 0)
+
+#Simple Interaction model
+full_int_model = lm(formula = count ~ (hour + 
+                                         temp + 
+                                         humid + 
+                                         solar + 
+                                         rainfall + 
+                                         season + 
+                                         holiday + 
+                                         dayofweek)^2, 
+                    data = bikeDemand_trn)
+
+selectedIntModelBIC = step(full_int_model, 
+                           direction = "backward", 
+                           k = log(nrow(bikeDemand_trn)), 
+                           trace = 0)
+
+summary(selectedBICStepModel)
+```
+
+The simple additive search resulted in a model with `r  summary(selectedBICStepModel)$adj.r.squared` Adjusted R2 and the search for a simple interaction model resulted in a model with `r summary(selectedIntModelBIC)$adj.r.squared` Adjusted R2.
+
+
+
+### Log Interaction Model
+
+As we aim a higher Adj R^2 value, we reduce the full model variables and build interaction model with transformations and a higher order of temperature
+
+
+Let's start with a model that takes the log() of the response variable and only use a select list of variables
+
+For interactions terms, let's consider two-way interactions betwen Temperature, Hour, Day of the Week and Holiday variables
+
+```{r}
+
+log_interaction_model_full_2way = lm( log(count) ~ (poly(temp,3) + 
+                                                      hour + 
+                                                      dayofweek  +
+                                                      holiday)^2 + 
+                                                log(rainfall+0.0001) +
+                                                log(snowfall + 0.0001), 
+                                      data = bikeDemand_trn)
+
+selected_log_interaction_model_2way  = step(log_interaction_model_full_2way, direction = "backward", k =2, trace = 0)
+
+summary(selected_log_interaction_model_2way)$adj.r.squared
+```
+
+Let's also use the same variables, but this time, try a 3 way interaction instead of the two-way interaction
+
+
+```{r}
+log_interaction_model_full_3way = lm( log(count) ~ (poly(temp,3) + 
+                                                      hour + 
+                                                      dayofweek  + 
+                                                      holiday)^3 + 
+                                        log(rainfall+0.0001) +
+                                        log(snowfall + 0.0001), 
+                                      data = bikeDemand_trn)
+
+selected_log_interaction_model_3way  = step(log_interaction_model_full_3way, direction = "backward", k =2, trace = 0)
+summary(selected_log_interaction_model_3way)$adj.r.squared
+```
+
+
+Looking at the Adj. R2 values, it doesn't suggest a significant lift by introducing the 3-way interaction. However, we can properly validate this by running an ANOVA test.
+
+```{r}
+#anova test
+res  =anova(selected_log_interaction_model_2way, selected_log_interaction_model_3way)
+res[2,"Pr(>F)"]
+```
+
+The ANOVA test results in a extremely small p-value suggesting that the bigger model if better
+
+
+Now we are going to use previous log model and refine it without the influential points to see whether it is going to make a difference
+
+```{r}
+#calculating cooks distance
+cooks = cooks.distance(selected_log_interaction_model_3way)
+
+
+log_interaction_model_3way_cooks_full = lm( log(count) ~ (poly(temp,3) + 
+                                                            hour + 
+                                                            dayofweek  + 
+                                                            holiday)^3+
+                                              log(rainfall+0.0001) +
+                                              log(snowfall + 0.0001), 
+                                            data = bikeDemand_trn[cooks< 4/ nrow(bikeDemand_trn),])
+
+selected_log_interaction_model_3way_cooks  = step(log_interaction_model_3way_cooks_full, direction = "backward", k =2, trace = 0)
+summary(selected_log_interaction_model_3way_cooks)$adj.r.squared
+```
+
+That gives a good lift to our Adjusted R2 value.
+
+
+### Box-Cox Transformation
+
+Following a similar approach to the log transformation, let's use a box-cox transformation on our dataset
+
+```{r}
+interaction_full = lm( count ~ (poly(temp,3) + 
+                                  hour + 
+                                  dayofweek  + 
+                                  holiday)^3+
+                         log(rainfall+0.0001) +
+                         log(snowfall + 0.0001), 
+                       data = bikeDemand_trn)
+
+selected_interaction_full  = step(interaction_full, direction = "backward", k =2, trace = 0)
+
+#box cox tranformation
+bc = MASS::boxcox(selected_interaction_full)
+
+lambda = bc$x[which.max(bc$y)]
+```
+
+We will use the resulting lambda  = `r lambda ` for the box-cox tranformation
+
+
+```{r}
+#applying box cox transformation to the previously selected model
+
+selected_interaction_boxcox = lm( paste("(count^lambda - 1)/lambda ~", 
+                                        as.character(formula(selected_interaction_full))[3], 
+                                        sep = ""), 
+                                  data = bikeDemand_trn)
+summary(selected_interaction_boxcox)$adj.r.squared
+```
+
+Also, we will test if we can remove some outlier in the model, we could achieve even higher adj^2
+
+```{r}
+#identifying outliers
+cooks = cooks.distance(selected_interaction_boxcox)
+
+
+selected_interaction_boxcox_no_outliers = lm( paste("((count^lambda) - 1)/lambda ~", 
+                                                    as.character(formula(selected_interaction_boxcox))[3], 
+                                                    sep = ""), 
+                                              data = bikeDemand_trn[cooks< 4/ nrow(bikeDemand_trn),])
+
+summary(selected_interaction_boxcox_no_outliers)$adj.r.squared
+```
+
+
+
+# Results
+
+Here we take a look at the summary of all models we built above.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+fullAdditiveBp = check_constant_variance(selectedBICStepModel)  #bp test pvalue
+selectedBICStepModelR2 = summary(selectedBICStepModel)$adj.r.squared
+set.seed(19930201)
+fullAdditiveSp = check_normality(selectedBICStepModel)   #shapiro test pvalue
+fullAdditiveRMSE = test_rmse(selectedBICStepModel,bikeDemand_tst)  # test rmse
+
+
+fullAdditiveMAE = test_mae(selectedBICStepModel,bikeDemand_tst)  # test rmse
+
+
+#calc_loocv_rmse(selectedBICStepModel)
+#selectedBICStepModelR2    # adj r^2
+fullAdditiveCoef = nrow(summary(selectedBICStepModel)$coefficients)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+selectedIntModelBICBp = check_constant_variance(selectedIntModelBIC)  #bp test pvalue
+set.seed(19930201)
+selectedIntModelBICSp = check_normality(selectedIntModelBIC)   #shapiro test pvalue
+selectedIntModelBICRMSE = test_rmse(selectedIntModelBIC,bikeDemand_tst)  # test rmse
+
+selectedIntModelBICMAE = test_mae(selectedIntModelBIC,bikeDemand_tst)  # test mae
+
+selectedIntModelBICR2 = summary(selectedIntModelBIC)$adj.r.squared
+selectedIntModelBICNumOfCoef = nrow(summary(selectedIntModelBIC)$coefficients)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+selected_log_interaction_model_3wayBp = check_constant_variance(selected_log_interaction_model_3way)  #bp test pvalue
+set.seed(19930201)
+selected_log_interaction_model_3waySp = check_normality(selected_log_interaction_model_3way)   #shapiro test pvalue
+selected_log_interaction_model_3wayRMSE = test_rmse(selected_log_interaction_model_3way,bikeDemand_tst, is_dependent_log = TRUE)  # test rmse
+
+selected_log_interaction_model_3wayMAE = test_mae(selected_log_interaction_model_3way,bikeDemand_tst, is_dependent_log = TRUE)  # test mae
+
+selected_log_interaction_model_3wayR2 = summary(selected_log_interaction_model_3way)$adj.r.squared    # adj r^2
+selected_log_interaction_model_3way_NumOfCoef = length(coefficients(selected_log_interaction_model_3way))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+selected_log_interaction_model_3way_cooksBp = check_constant_variance(selected_log_interaction_model_3way_cooks)  #bp test pvalue
+set.seed(19930201)
+selected_log_interaction_model_3way_cooksSp =  check_normality(selected_log_interaction_model_3way_cooks)   #shapiro test pvalue
+selected_log_interaction_model_3way_cooksRMSE = test_rmse(selected_log_interaction_model_3way_cooks,bikeDemand_tst, is_dependent_log = TRUE)  # test rmse
+
+selected_log_interaction_model_3way_cooksMAE = test_mae(selected_log_interaction_model_3way_cooks,bikeDemand_tst, is_dependent_log = TRUE)  # test mae
+
+selected_log_interaction_model_3way_cooksR2 = summary(selected_log_interaction_model_3way_cooks)$adj.r.squared    # adj r^2
+selected_log_interaction_model_3way_cooksNumOfCoef = length(coefficients(selected_log_interaction_model_3way_cooks)) 
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+selected_boxcox_interaction_model_3wayBp = check_constant_variance(selected_interaction_boxcox)  #bp test pvalue
+set.seed(19930201)
+selected_boxcox_interaction_model_3waySp = check_normality(selected_interaction_boxcox)   #shapiro test pvalue
+
+
+t = predict(selected_interaction_boxcox, newdata = bikeDemand_tst)
+selected_boxcox_interaction_model_3wayRMSE = MLmetrics::RMSE( ((lambda * t+1)^2)^((1/lambda)/2), bikeDemand_tst$count)
+
+selected_boxcox_interaction_model_3wayMAE = MLmetrics::MAE( ((lambda * t+1)^2)^((1/lambda)/2), bikeDemand_tst$count)
+
+selected_boxcox_interaction_model_3wayR2 = summary(selected_interaction_boxcox)$adj.r.squared    # adj r^2
+selected_boxcox_interaction_model_3way_NumOfCoef = length(coefficients(selected_interaction_boxcox))
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+selected_boxcox_interaction_model_3way_cooksBp = check_constant_variance(selected_interaction_boxcox_no_outliers)  #bp test pvalue
+set.seed(19930201)
+selected_boxcox_interaction_model_3way_cooksSp =  check_normality(selected_interaction_boxcox_no_outliers)   #shapiro test pvalue
+
+t = predict(selected_interaction_boxcox_no_outliers, newdata = bikeDemand_tst)
+selected_boxcox_interaction_model_3wayRMSE_cooks = MLmetrics::RMSE( ((lambda * t+1)^2)^((1/lambda)/2), bikeDemand_tst$count)
+
+selected_boxcox_interaction_model_3wayMAE_cooks = MLmetrics::MAE( ((lambda * t+1)^2)^((1/lambda)/2), bikeDemand_tst$count)
+
+selected_boxcox_interaction_model_3way_cooksR2 = summary(selected_interaction_boxcox_no_outliers)$adj.r.squared    # adj r^2
+selected_boxcox_interaction_model_3way_cooksNumOfCoef = length(coefficients(selected_interaction_boxcox_no_outliers)) 
+```
+
+### Model Assumptions
+
+Here are the results of test run to check Normality (Shapiro Test), and constant variance( BP Test)
+
+| Model | Shapiro.Test P-value |  BP test P value |
+|---|---|---|
+| Simple Additive Model     | `r fullAdditiveSp` | `r fullAdditiveBp`   |
+| Simple Interaction Model  | `r selectedIntModelBICSp` |  `r selectedIntModelBICBp` |
+| Log Transformed Model     | `r selected_log_interaction_model_3waySp` | `r selected_log_interaction_model_3wayBp`  |
+| Log Transformed Model (Excludes Influential Points) | `r selected_log_interaction_model_3way_cooksSp` | `r selected_log_interaction_model_3way_cooksBp`  |
+| Box-Cox Transformed Model  | `r selected_boxcox_interaction_model_3waySp` | `r selected_boxcox_interaction_model_3wayBp`  |
+| Box-Cox Transformed Model (Excludes Influential Points) | `r selected_boxcox_interaction_model_3way_cooksSp` |  `r selected_boxcox_interaction_model_3way_cooksBp` |
+
+### Model Performance
+
+
+The test sample was used to evaluate the model performance and the observed results included in the below table.
+
+| Model | Adjusted R2 |  Test RMSE | Test MAE |
+|---|---|---|---|
+| Simple Additive Model     | `r summary(selectedBICStepModel)$adj.r.squared` | `r fullAdditiveRMSE`   | `r fullAdditiveMAE`|
+| Simple Interaction Model  | `r summary(selectedIntModelBIC)$adj.r.squared` |  `r selectedIntModelBICRMSE` | `r selectedIntModelBICMAE`|
+| Log Transformed Model     | `r selected_log_interaction_model_3wayR2` |  `r selected_log_interaction_model_3wayRMSE` | `r selected_log_interaction_model_3wayMAE` |
+| **Log Transformed Model (Excludes Influential Points)** | **`r selected_log_interaction_model_3way_cooksR2`** | **`r selected_log_interaction_model_3way_cooksRMSE`**  | **`r selected_log_interaction_model_3way_cooksMAE`**|
+| Box-Cox Transformed Model  | `r selected_boxcox_interaction_model_3wayR2` |  `r selected_boxcox_interaction_model_3wayRMSE` | `r selected_boxcox_interaction_model_3wayMAE`|
+|**Box-Cox Transformed Model (Excludes Influential Points)** | **`r selected_boxcox_interaction_model_3way_cooksR2`** | **`r selected_boxcox_interaction_model_3wayRMSE_cooks`**  | **`r selected_boxcox_interaction_model_3wayMAE_cooks`**|
+
+
+### Final Models
+
+We can select the final models based on the model performance on the test RMSE and MAE (Mean Absolute Error).
+
+ - **Final Model1** : **Log Transformed Model (Excludes Influential Points)**
+
+`r  print_formula(selected_log_interaction_model_3way_cooks)`
+
+
+ - **Final Model2** : **Box-Cox Transformed Model(Excludes Influential Points)**
+ 
+`r  print_formula(selected_interaction_boxcox_no_outliers)` 
+
+where lambda is `r lambda `.
+ 
+
+### Diagnostic Plots
+
+Here we show the plots for the two best models according to the Test RMSE 
+
+**Normal QQ Plot**
+
+Normal QQ plots of the model residuals suggest violation of the normality assumption
+
+```{r fig.height=4, fig.width=15, echo=FALSE}
+
+res_log = data.frame(y = resid(selected_log_interaction_model_3way_cooks))
+p1 <- ggplot(res_log, aes(sample = y)) + stat_qq(colour = 'cadetblue') + stat_qq_line(colour = 'orange') + ylab("Sample Quantiles") + xlab("Theoretical Quantiles") + labs(title = "Normal QQ-Plot, Log Transformed Model (Excl. Influential Points)")
+
+res_box = data.frame(y = resid(selected_interaction_boxcox_no_outliers))
+p2 <- ggplot(res_box, aes(sample = y)) + stat_qq(colour = 'cadetblue') + stat_qq_line(colour = 'orange') + ylab("Sample Quantiles") + xlab("Theoretical Quantiles") + labs(title = "Normal QQ-Plot, Box-Cox Transformed Model(Excl. Influential Points)")
+
+p1 + p2
+```
+
+
+**Residual vs. Fitted Value Plots**
+
+
+```{r fig.height=4, fig.width=15, echo=FALSE}
+
+d_log = data.frame(y = rstandard(selected_log_interaction_model_3way_cooks), x = selected_log_interaction_model_3way_cooks$fitted.values)
+p1 <- ggplot(d_log, aes(y = y, x = x)) + geom_point(colour = 'cadetblue') + 
+  ylab("Sample Quantiles") + 
+  xlab("Theoretical Quantiles") + 
+  labs(title = "Residual Plot, Log Transformed Model (Excl. Influential Points)")+
+  geom_hline(yintercept = 0, colour = "orange")
+
+d_box = data.frame(y = rstandard(selected_interaction_boxcox_no_outliers), x = selected_interaction_boxcox_no_outliers$fitted.values)
+p2 <- ggplot(d_log, aes(y = y, x = x)) + 
+  geom_point(colour = 'cadetblue') +
+  ylab("Sample Quantiles") + 
+  xlab("Theoretical Quantiles") + 
+  labs(title = "Residual Plot, Box-Cox Transformed Model(Excl. Influential Points)")+
+  geom_hline(yintercept = 0, colour = "orange")
+
+p1 + p2
+```
+
+
+# Discussion 
+
+During our model exploration process, we build three types of models
+
+- Simple additive and interaction models
+- Log Transformed model – Two models, with and without influential points
+- Box-Cox Transformed model – Two models, with and without influential points
+
+Log and Box-Cox transformed models yielded higher Adjusted R2, which is over 90%, and have better performance on the test sample.  
+For both transformation types, excluding influential points helped improve the test sample's performance 
+
+Our best models are given below.
+
+- Log Transformed Model(Excl. Influential Points), Test RMSE = 245.5, MAE: 147.8, Adjusted R2 = 92.7%
+- Box-Cox Transformed Model(Excl. Influential Points), Test RMSE = 245.7, MAE: 148.3, Adjusted R2 = 92.6%
+We have picked one from each type of transformation
+
+Both of our final models contain the following variables and interactions. It is clear that the model has been able to capture the key variables one would think would be impacting someone's decision to ride a bicycle.
+
+- hour
+- dayofweek 
+- holiday 
+- log(rainfall + 0.0001) 
+- log(snowfall + 0.0001) 
+- poly(temp, 3):hour 
+- poly(temp, 3):dayofweek 
+- poly(temp, 3):holiday 
+- hour:dayofweek 
+- hour:holiday 
+- dayofweek:holiday 
+- poly(temp, 3):dayofweek:holiday
+
+All the models that were tested failed the normality assumption test and the constant variance test. However, the Residual plots seem to be showing sufficient constant variance given the real-life nature of the dataset we used for this project.
+
+**Alternative approaches**
+
+- There is a possibility that a count-based model such as Poisson or Negative Binomial may have suited better for this dataset, given the response variable, i.e., the number of Rented bikes is an integer.
+- Given that there are many factor variables, Tree-based methods such as Decision Trees or Random Forest might have the ability to capture the variability better.
+
+However, those types of models were not in scope for our exploration.
+
+
+**Usefulness of the Model**
+
+- For any bike rental company, it is important to know when to expect higher and lower demand. 
+- When the demand is high, the company needs to deploy vehicles to distribute the bikes across their stations so that the riders have enough bikes when needed
+- The models that we explored during this study are helpful in understanding the hourly demand for bikes. With a MAE ~148, our error rate is ~21% (148 divided by avg hourly demand, which is 704.5). 
+- The variables we used in the models(e.g., weather, holidays) are predictable and will know in advance. Therefore, it allows us to predict the expected bike demand in advance as well.
+
+
+# Appendix 
+
+```{r eval=FALSE, include=TRUE}
+
+#function to conduct constant variance test
+check_constant_variance = function(model){
+  x = bptest(model)
+  return(bptest(model)$p.value[["BP"]])
+}
+
+
+#function to conduct the normality test
+check_normality = function(model, random_samples = 5){
+  probs = rep(0, random_samples)
+  for(i in 1:random_samples){
+    probs[i] = shapiro.test(sample(hatvalues(model),5000))$p.value #run Shapiro test for multiple random samples  
+  }
+  return(mean(probs))
+}
+
+#function calculate test rmse
+test_rmse = function(model, testdataset, is_dependent_log = FALSE){
+  
+  if(is_dependent_log){
+    pred = exp(predict(model, newdata = testdataset))
+  }else{
+    pred = predict(model, newdata = testdataset)
+  }
+  
+  rmse = sqrt(mean((pred - testdataset$count)^2))
+  rmse
+}
+
+#function to calculate loocv_rmse
+calc_loocv_rmse = function(model) {
+  sqrt(mean((resid(model) / (1 - hatvalues(model))) ^ 2))
+}
+
+#MAE
+test_mae = function(model, testdataset, is_dependent_log = FALSE){
+  
+  if(is_dependent_log){
+    pred = exp(predict(model, newdata = testdataset))
+  }else{
+    pred = predict(model, newdata = testdataset)
+  }
+  
+  mae = MLmetrics::MAE(pred, testdataset$count)
+  mae
+}
+
+
+#code for plots and data cleaning
+
+panel.cor = function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    #cex.cor <- 0.8/strwidth(txt) 
+    text(0.5, 0.5, txt, cex = 1)
+}
+
+upper.panel<-function(x, y){
+  points(x,y, pch = 19, col = 'cadetblue')
+}
+
+datetime_variables = cbind(origin_set$Rented.Bike.Count, origin_set$Date,origin_set$Hour,origin_set$Seasons)
+colnames(datetime_variables) = c("Rented.Bike.Count","Date", "Hour", "Seasons")
+pairs(datetime_variables, lower.panel = panel.cor, upper.panel = upper.panel)
+
+
+
+par(mfrow=c(1,2))
+
+a = origin_set %>%
+    group_by(Seasons) %>%
+    summarise(sum_count = mean(Rented.Bike.Count))
+
+
+b = origin_set %>%
+    group_by(Date) %>%
+    summarise(sum_count = mean(Rented.Bike.Count))
+barplot(a$sum_count,names.arg=a$Seasons,xlab="Seasons",ylab="Count",col="cadetblue",
+main="Seasons vs # of Rented Bikes",space=5)
+
+barplot(b$sum_count,names.arg=b$Date,xlab="Date",ylab="Count",col="cadetblue",
+main="Dates vs # of Rented Bikes")
+
+
+#Extracting Day of the week from date and categorizing into Weekend and Weekday
+
+origin_set$Day = format(origin_set$Date, '%A')
+weekdays <- c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday')
+origin_set$Weekend = factor((origin_set$Day %in% weekdays),levels = c(FALSE, TRUE),labels = c('weekend', 'weekday'))
+origin_set$Day = factor(origin_set$Day, levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))
+
+#removing date
+origin_set$Date = NULL
+
+dayofweek_summary = aggregate(list(origin_set$Rented.Bike.Count), by = list(origin_set$Day), FUN = 'mean')
+names(dayofweek_summary) = c("DayofWeek","AvgRentedBikeCount")
+
+g0 = ggplot(data=dayofweek_summary, aes(x=DayofWeek, y=round(AvgRentedBikeCount, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue",width=0.4)+ xlab("Day of Week") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Day of Week")+
+    geom_text(aes(label=round(AvgRentedBikeCount,digits=0)), vjust=-0.3, size=3.5)+ylim(0,900)+
+  theme_minimal()
+
+# 1 . Binning hours to time period
+# 2.  Creating a factor variable for hour
+origin_set$Hour <- as.numeric(origin_set$Hour)
+breaks = c(0,4,7,10,13,17,20,24)
+hours_label = c('midnight', 'sunrise','rushmorning','forenoon','afternoon','rusheven','evening')
+group_tags <- cut(origin_set$Hour, 
+                  breaks=breaks, 
+                  include.lowest=TRUE, 
+                  right=FALSE, 
+                  labels=hours_label)
+origin_set$timeslot = group_tags
+origin_set$Hour = factor(origin_set$Hour)
+
+hourly_summary = aggregate(list(origin_set$Rented.Bike.Count), by = list(origin_set$Hour), FUN = 'mean')
+names(hourly_summary) = c("Hour","AvgRentedBikeCount")
+
+g1 = ggplot(data=hourly_summary, aes(x=Hour, y=round(AvgRentedBikeCount, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue")+ xlab("Hour") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Hour")+
+    geom_text(aes(label=round(AvgRentedBikeCount,digits=0)), vjust=-0.3, size=3.5)+
+      theme(axis.text.x = element_text(size = 8))+
+  theme_minimal()
+
+g0+g1
+
+c = origin_set %>%
+	group_by(timeslot) %>%
+	summarise(sum_count = mean(Rented.Bike.Count))
+
+# par(mfrow=c(2,1))
+# barplot(c$sum_count,names.arg=c$timeslot,xlab="Time Slots",ylab="Count",col="cadetblue",
+# main="Time Slots vs # of Rented Bikes",space=1,cex.axis=1, cex.names=0.8)
+# barplot(d$sum_count,names.arg=d$Weekend,xlab="Weekend",ylab="Count",col="cadetblue",
+# main="Weekend vs # of Rented Bikes",space=2)
+
+g2 = ggplot(data=c, aes(x=timeslot, y=round(sum_count, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue",width=0.4)+ xlab("Time Slot") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Timeslot")+
+    geom_text(aes(label=round(sum_count,digits=0)), vjust=-0.3, size=3.5)+ ylim(0,1500)+
+      theme(axis.text.x = element_text(size = 8))+
+  theme_minimal()
+
+d = origin_set %>%
+	group_by(Weekend) %>%
+	summarise(sum_count = mean(Rented.Bike.Count))
+
+
+g3 =ggplot(data=d, aes(x=Weekend, y=round(sum_count, digits=0))) +
+  geom_bar(stat="identity", fill="cadetblue",width=0.4)+ xlab("Time Slot") + ylab("Avg. Rented Bike Count")+labs(title = "Avg. Rented Bike Count by Weekday vs. Weekend")+
+    geom_text(aes(label=round(sum_count,digits=0)), vjust=-0.3, size=3.5)+ ylim(0,800)+
+      theme(axis.text.x = element_text(size = 8))+
+  theme_minimal()
+
+g2+g3
+
+# Check Missing Data
+bikeDemand = origin_set
+sum(is.na(bikeDemand))==0   # pass
+
+#rename variables
+
+colnames(bikeDemand) = c("count" ,"hour","temp", "humid", "windspeed", 
+                      "visibility", "dewtemp", "solar","rainfall","snowfall",
+                      "season","holiday","dayofweek","weekend","timeslot")
+
+
+panel.cor = function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    #cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = 1)
+}
+
+upper.panel<-function(x, y){
+  points(x,y, pch = 19, col = 'cadetblue',cex = .5)
+}
+
+weather_variables = bikeDemand_trn[,c("count","temp","humid","windspeed","visibility","dewtemp","solar","rainfall","snowfall")]
+#colnames(datetime_variables) = c("Rented.Bike.Count","Date", "Hour", "Seasons")
+pairs(weather_variables, lower.panel = panel.cor, upper.panel = upper.panel,cex.labels=2)
+
+
+```
+
+
+
+
+
+
